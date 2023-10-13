@@ -32,6 +32,7 @@ from neutron_lib import constants
 from neutron_lib.db import api as db_api
 from neutron_lib import exceptions as n_exc
 from neutron_lib.exceptions import l3 as l3_exc
+from neutron_lib.exceptions import agent as agent_exc
 from neutron_lib.exceptions import l3_ext_ha_mode as l3ha_exc
 from neutron_lib.objects import exceptions as obj_base
 from neutron_lib.plugins import utils as p_utils
@@ -54,6 +55,7 @@ from neutron.db import l3_dvr_db
 from neutron.objects import base
 from neutron.objects import l3_hamode
 from neutron.objects import router as l3_obj
+from neutron.objects import agent as agent_obj
 
 
 VR_ID_RANGE = set(range(1, 255))
@@ -378,12 +380,85 @@ class L3_HA_NAT_db_mixin(l3_dvr_db.L3_NAT_with_dvr_db_mixin,
         if not self.get_ha_network(context, router['tenant_id']):
             self._create_ha_network(context, router['tenant_id'])
 
+    @staticmethod
+    def _check_router_configurations_creation(context,
+                                              configurations: dict,
+                                              is_ha: bool = True):
+        agents = agent_obj.Agent.get_objects(context,
+                                             binary='neutron-l3-agent')
+        agents = [agent['host'] for agent in agents]
+        master = configurations.get('master_agent', None)
+        slaves = configurations.get('slave_agents', [])
+        preferred_agent = configurations.get('preferred_agent', None)
+        if is_ha:
+            if master and slaves:
+                for agent in [master] + slaves:
+                    if agent not in agents:
+                        raise agent_exc.AgentNotFound(id=agent)
+                if master in slaves:
+                    raise l3_exc.RouterAgentConflict()
+            else:
+                if master or slaves:
+                    raise l3_exc.RouterAgentNotGiven()
+        else:
+            if preferred_agent and preferred_agent not in agents:
+                raise agent_exc.AgentNotFound(id=preferred_agent)
+
+    @staticmethod
+    def _check_router_configurations_update(context,
+                                            configurations: dict,
+                                            old_configurations: dict,
+                                            is_ha: bool = True) -> bool:
+        if configurations == old_configurations:
+            return False
+
+        agents = agent_obj.Agent.get_objects(context,
+                                             binary='neutron-l3-agent')
+        agents = [agent['host'] for agent in agents]
+        master = configurations.get('master_agent', None)
+        slaves = configurations.get('slave_agents', [])
+        preferred_agent = configurations.get('preferred_agent', None)
+        old_master = old_configurations.get('master_agent', None)
+        old_slaves = old_configurations.get('slave_agents', [])
+        old_preferred_agent = old_configurations.get('preferred_agent', None)
+        if is_ha:
+            if master:
+                if master != old_master:
+                    if master not in agents:
+                        raise agent_exc.AgentNotFound(id=master)
+                    old_configurations['master_agent'] = master
+            if slaves:
+                if slaves != old_slaves:
+                    for slave in slaves:
+                        if slave not in agents:
+                            raise agent_exc.AgentNotFound(id=slave)
+                    old_configurations['slave_agents'] = slaves
+            if (old_configurations['master_agent'] in
+                    old_configurations['slave_agents']):
+                raise l3_exc.RouterAgentConflict()
+        else:
+            if preferred_agent:
+                if preferred_agent != old_preferred_agent:
+                    if preferred_agent not in agents:
+                        raise agent_exc.AgentNotFound(id=preferred_agent)
+                    old_configurations['preferred_agent'] = preferred_agent
+            else:
+                old_configurations['preferred_agent'] = None
+
+        return True
+
     @registry.receives(resources.ROUTER, [events.PRECOMMIT_CREATE],
                        priority_group.PRIORITY_ROUTER_EXTENDED_ATTRIBUTE)
     def _precommit_router_create(self, resource, event, trigger, context,
                                  router, router_db, **kwargs):
         """Event handler to set ha flag and status on creation."""
         is_ha = self._is_ha(router)
+        configurations = router.get('configurations', {})
+        if configurations:
+            self._check_router_configurations_creation(context, configurations,
+                                                       is_ha)
+        self.set_extra_attr_value(context, router_db, 'configurations',
+                                  configurations)
         router['ha'] = is_ha
         self.set_extra_attr_value(context, router_db, 'ha', is_ha)
         if not is_ha:
@@ -464,6 +539,28 @@ class L3_HA_NAT_db_mixin(l3_dvr_db.L3_NAT_with_dvr_db_mixin,
              old_owner=old_owner, new_owner=new_owner)
         self.set_extra_attr_value(
             payload.context, payload.desired_state, 'ha', requested_ha_state)
+
+    @registry.receives(resources.ROUTER, [events.PRECOMMIT_UPDATE],
+                       priority_group.PRIORITY_ROUTER_EXTENDED_ATTRIBUTE)
+    def _validate_configurations(self, resource, event, trigger, payload=None):
+        old_configurations = payload.states[0].get('configurations', {})
+        configurations = payload.request_body.get('configurations', {})
+
+        if not configurations:
+            return
+
+        if payload.desired_state.admin_state_up:
+            msg = _('Cannot change configurations of active routers. Please '
+                    'set router admin_state_up to False prior to upgrade')
+            raise n_exc.BadRequest(resource='router', msg=msg)
+
+        need_update = self._check_router_configurations_update(
+            payload.context, configurations, old_configurations,
+            payload.states[0]['ha'])
+
+        if need_update:
+            self.set_extra_attr_value(payload.context, payload.desired_state,
+                                      'configurations', old_configurations)
 
     @registry.receives(resources.ROUTER, [events.AFTER_UPDATE],
                        priority_group.PRIORITY_ROUTER_EXTENDED_ATTRIBUTE)

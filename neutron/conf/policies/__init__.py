@@ -34,6 +34,7 @@ from neutron.conf.policies import port
 from neutron.conf.policies import qos
 from neutron.conf.policies import rbac
 from neutron.conf.policies import router
+from neutron.conf.policies import rg_port_forwarding
 from neutron.conf.policies import security_group
 from neutron.conf.policies import segment
 from neutron.conf.policies import service_type
@@ -63,6 +64,7 @@ def list_rules():
         qos.list_rules(),
         rbac.list_rules(),
         router.list_rules(),
+        rg_port_forwarding.list_rules(),
         security_group.list_rules(),
         segment.list_rules(),
         service_type.list_rules(),

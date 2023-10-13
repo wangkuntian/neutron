@@ -14,13 +14,15 @@
 #    under the License.
 
 import abc
-import collections
+import random
 import functools
 import itertools
-import random
+import collections
+from typing import List, Optional
 
 from neutron_lib.api.definitions import availability_zone as az_def
 from neutron_lib import constants as lib_const
+from neutron_lib.context import Context
 from neutron_lib.db import api as lib_db_api
 from neutron_lib.exceptions import l3 as l3_exc
 from oslo_config import cfg
@@ -31,8 +33,9 @@ import six
 from neutron.common import utils
 from neutron.conf.db import l3_hamode_db
 from neutron.db.models import l3agent as rb_model
+from neutron.objects.agent import Agent
 from neutron.objects import l3agent as rb_obj
-
+from neutron.services.l3_router.l3_router_plugin import L3RouterPlugin
 
 LOG = logging.getLogger(__name__)
 cfg.CONF.register_opts(l3_hamode_db.L3_HA_OPTS)
@@ -228,26 +231,25 @@ class L3Scheduler(object):
         if not candidates:
             return
         elif sync_router.get('ha', False):
-            chosen_agents = self._bind_ha_router(plugin, context,
-                                                 router_id,
-                                                 sync_router.get('tenant_id'),
+            chosen_agents = self._bind_ha_router(plugin, context, sync_router,
                                                  candidates)
             if not chosen_agents:
                 return
             chosen_agent = chosen_agents[-1]
         else:
             chosen_agent = self._choose_router_agent(
-                plugin, context, candidates)
+                context, plugin, candidates, sync_router)
             self.bind_router(plugin, context, router_id, chosen_agent.id)
         return chosen_agent
 
     @abc.abstractmethod
-    def _choose_router_agent(self, plugin, context, candidates):
+    def _choose_router_agent(self, context, plugin, candidates, sync_router):
         """Choose an agent from candidates based on a specific policy."""
         pass
 
     @abc.abstractmethod
-    def _choose_router_agents_for_ha(self, plugin, context, candidates):
+    def _choose_router_agents_for_ha(self, context, plugin, candidates,
+                                     sync_router):
         """Choose agents from candidates based on a specific policy."""
         pass
 
@@ -315,19 +317,19 @@ class L3Scheduler(object):
         hosting_list = [tuple(host) for host in hosting]
         return list(set(candidates) - set(hosting_list))
 
-    def _bind_ha_router(self, plugin, context, router_id,
-                        tenant_id, candidates):
+    def _bind_ha_router(self, plugin, context, sync_router, candidates):
         """Bind a HA router to agents based on a specific policy."""
-
+        router_id = sync_router.get('id')
+        tenant_id = sync_router.get('tenant_id')
         candidates = self._filter_scheduled_agents(plugin, context, router_id,
                                                    candidates)
 
         chosen_agents = self._choose_router_agents_for_ha(
-            plugin, context, candidates)
+            context, plugin, candidates, sync_router)
 
         for agent in chosen_agents:
-            self.create_ha_port_and_bind(plugin, context, router_id,
-                                         tenant_id, agent)
+            self.create_ha_port_and_bind(plugin, context, router_id, tenant_id,
+                                         agent)
 
         return chosen_agents
 
@@ -335,10 +337,11 @@ class L3Scheduler(object):
 class ChanceScheduler(L3Scheduler):
     """Randomly allocate an L3 agent for a router."""
 
-    def _choose_router_agent(self, plugin, context, candidates):
+    def _choose_router_agent(self, context, plugin, candidates, sync_router):
         return random.choice(candidates)
 
-    def _choose_router_agents_for_ha(self, plugin, context, candidates):
+    def _choose_router_agents_for_ha(self, context, plugin, candidates,
+                                     sync_router):
         num_agents = self._get_num_of_agents_for_ha(len(candidates))
         return random.sample(candidates, num_agents)
 
@@ -346,13 +349,14 @@ class ChanceScheduler(L3Scheduler):
 class LeastRoutersScheduler(L3Scheduler):
     """Allocate to an L3 agent with the least number of routers bound."""
 
-    def _choose_router_agent(self, plugin, context, candidates):
+    def _choose_router_agent(self, context, plugin, candidates, sync_router):
         candidate_ids = [candidate['id'] for candidate in candidates]
         chosen_agent = plugin.get_l3_agent_with_min_routers(
             context, candidate_ids)
         return chosen_agent
 
-    def _choose_router_agents_for_ha(self, plugin, context, candidates):
+    def _choose_router_agents_for_ha(self, context, plugin, candidates,
+                                     sync_router):
         num_agents = self._get_num_of_agents_for_ha(len(candidates))
         ordered_agents = plugin.get_l3_agents_ordered_by_num_routers(
             context, [candidate['id'] for candidate in candidates])
@@ -397,7 +401,8 @@ class AZLeastRoutersScheduler(LeastRoutersScheduler):
 
         return candidates
 
-    def _choose_router_agents_for_ha(self, plugin, context, candidates):
+    def _choose_router_agents_for_ha(self, context, plugin, candidates,
+                                     sync_router):
         ordered_agents = plugin.get_l3_agents_ordered_by_num_routers(
             context, [candidate['id'] for candidate in candidates])
         num_agents = self._get_num_of_agents_for_ha(len(ordered_agents))
@@ -416,3 +421,65 @@ class AZLeastRoutersScheduler(LeastRoutersScheduler):
             if len(selected_agents) >= num_agents:
                 break
         return selected_agents
+
+
+class PreferredL3AgentRoutersScheduler(LeastRoutersScheduler):
+
+    @staticmethod
+    def get_preferred_agent(sync_router: dict) -> Optional[str]:
+        configurations = sync_router.get('configurations', {})
+        if configurations:
+            return configurations.get('preferred_agent', None)
+        return None
+
+    @staticmethod
+    def get_agents(sync_router: dict) -> Optional[List[str]]:
+        configurations = sync_router.get('configurations', {})
+        if configurations:
+            master = configurations.get('master_agent', None)
+            slaves = configurations.get('slave_agents', [])
+            if master and slaves:
+                return slaves + [master]
+        return []
+
+    def _choose_router_agent(self, context: Context,
+                             plugin: L3RouterPlugin,
+                             candidates: List[Agent],
+                             sync_router: dict) -> Agent:
+        agent = self.get_preferred_agent(sync_router)
+        if agent:
+            new_candidates = [candidate for candidate in candidates
+                              if candidate['host'] == agent]
+            if not new_candidates:
+                LOG.warning(f"Router {sync_router['id']} failed to "
+                            f"schedule l3 agent on {agent}.")
+            else:
+                agent = new_candidates[0]
+                LOG.debug(f"Router {sync_router['id']} l3 agent is {agent}.")
+                return agent
+        agent = super()._choose_router_agent(context, plugin, candidates,
+                                             sync_router)
+        return agent
+
+    def _choose_router_agents_for_ha(self, context: Context,
+                                     plugin: L3RouterPlugin,
+                                     candidates: List[Agent],
+                                     sync_router: dict) -> List[Agent]:
+
+        agents = self.get_agents(sync_router)
+        if agents:
+            if self.max_ha_agents < len(agents):
+                agents = agents[len(agents) - self.max_ha_agents:]
+            new_candidates = [candidate for candidate in candidates if
+                              candidate['host'] in agents]
+            if len(new_candidates) != len(agents):
+                LOG.warning(f"Router {sync_router['id']} failed to "
+                            f"schedule l3 agents on {agents}.")
+            else:
+                LOG.debug(f"Router {sync_router['id']} l3 agents are "
+                          f"{new_candidates}.")
+                return new_candidates
+
+        return super(
+            PreferredL3AgentRoutersScheduler, self
+        )._choose_router_agents_for_ha(context, plugin, candidates, sync_router)

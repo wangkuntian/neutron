@@ -38,6 +38,7 @@ from oslo_utils import importutils
 
 from neutron.api.rpc.agentnotifiers import l3_rpc_agent_api
 from neutron.api.rpc.handlers import l3_rpc
+from neutron.conf.common import NETWORK_HOST_OPTS
 from neutron.db import dns_db
 from neutron.db import extraroute_db
 from neutron.db import l3_dvr_ha_scheduler_db
@@ -135,6 +136,17 @@ class L3RouterPlugin(service_base.ServicePluginBase,
 
         self.add_worker(rpc_worker)
         self.l3_driver_controller = driver_controller.DriverController(self)
+        self.compute_to_network = dict()
+        self._init_compute_to_network()
+
+    def _init_compute_to_network(self):
+        for network_node in cfg.CONF.network_nodes:
+            cfg.CONF.register_opts(NETWORK_HOST_OPTS, group=network_node)
+            network_group = cfg.CONF.get(network_node, None)
+            if network_group:
+                compute_nodes = network_group.get('compute_nodes', [])
+                for compute_node in compute_nodes:
+                    self.compute_to_network[compute_node] = network_node
 
     @property
     def supported_extension_aliases(self):

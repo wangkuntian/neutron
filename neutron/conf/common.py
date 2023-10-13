@@ -145,7 +145,21 @@ core_opts = [
                       "Setting to any positive integer means that on failure "
                       "the connection is retried that many times. "
                       "For example, setting to 3 means total attempts to "
-                      "connect will be 4."))
+                      "connect will be 4.")),
+    cfg.BoolOpt('enable_set_route_for_single_port', default=False,
+                help=_("To set route path for every single port "
+                       "when the same subnet has multi ports on router.")),
+    cfg.ListOpt('network_nodes',
+                default=[],
+                help=_("The list of network hosts to "
+                       "make a network map "
+                       "with compute node and network node.")),
+]
+
+NETWORK_HOST_OPTS = [
+    cfg.ListOpt('compute_nodes',
+                default=[],
+                help=_("The list of compute hosts."))
 ]
 
 core_cli_opts = [

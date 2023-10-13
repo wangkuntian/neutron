@@ -766,11 +766,7 @@ class RouterInfo(BaseRouterInfo):
         LOG.debug("External gateway added: port(%s), interface(%s), ns(%s)",
                   ex_gw_port, interface_name, ns_name)
         self._plug_external_gateway(ex_gw_port, interface_name, ns_name)
-        self._external_gateway_settings(ex_gw_port, interface_name,
-                                        ns_name, preserve_ips)
 
-    def _external_gateway_settings(self, ex_gw_port, interface_name,
-                                   ns_name, preserve_ips):
         # Build up the interface and gateway IP addresses that
         # will be added to the interface.
         ip_cidrs = common_utils.fixed_ip_cidrs(ex_gw_port['fixed_ips'])
@@ -815,19 +811,18 @@ class RouterInfo(BaseRouterInfo):
         return any(netaddr.IPAddress(gw_ip).version == 6
                    for gw_ip in gateway_ips)
 
-    def get_router_preserve_ips(self):
+    def external_gateway_added(self, ex_gw_port, interface_name):
         preserve_ips = self._list_floating_ip_cidrs() + list(
             self.centralized_port_forwarding_fip_set)
         preserve_ips.extend(self.agent.pd.get_preserve_ips(self.router_id))
-        return preserve_ips
 
-    def external_gateway_added(self, ex_gw_port, interface_name):
-        preserve_ips = self.get_router_preserve_ips()
         self._external_gateway_added(
             ex_gw_port, interface_name, self.ns_name, preserve_ips)
 
     def external_gateway_updated(self, ex_gw_port, interface_name):
-        preserve_ips = self.get_router_preserve_ips()
+        preserve_ips = self._list_floating_ip_cidrs() + list(
+            self.centralized_port_forwarding_fip_set)
+        preserve_ips.extend(self.agent.pd.get_preserve_ips(self.router_id))
         self._external_gateway_added(
             ex_gw_port, interface_name, self.ns_name, preserve_ips)
 

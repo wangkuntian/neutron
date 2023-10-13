@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import time
+from typing import List
 
 import netaddr
 from neutron_lib.api.definitions import extra_dhcp_opt as edo_ext
@@ -40,6 +41,7 @@ from neutron.agent.linux import iptables_manager
 from neutron.cmd import runtime_checks as checks
 from neutron.common import ipv6_utils
 from neutron.common import utils as common_utils
+from neutron.conf.common import NETWORK_HOST_OPTS
 from neutron.ipam import utils as ipam_utils
 
 LOG = logging.getLogger(__name__)
@@ -79,6 +81,51 @@ def port_requires_dhcp_configuration(port):
         constants.DEVICE_OWNER_ROUTER_HA_INTF,
         constants.DEVICE_OWNER_FLOATINGIP,
         constants.DEVICE_OWNER_DHCP]
+
+
+class Octopus(object):
+    def __init__(self):
+        self.tentacles = collections.defaultdict(Tentacle)
+
+    def __str__(self):
+        lines = ['']
+        for subnet_id, tentacle in self.tentacles.items():
+            line = (f"Subnet {subnet_id} has multi routers "
+                    f"{len(tentacle.gateway_ports) > 1} "
+                    f"{tentacle}")
+            lines.append(line)
+        return '\n'.join(lines)
+
+
+class Tentacle(object):
+    def __init__(self, gateway_ip: str):
+        self.gateway_ip = gateway_ip
+        self.tags = []
+        self.gateway_ports = collections.defaultdict(Sucker)
+        self.suckers = collections.defaultdict(Sucker)
+
+    def __str__(self):
+        lines = [""]
+        for port_id, sucker in self.suckers.items():
+            line = f"  Port {port_id} {sucker}"
+            lines.append(line)
+        return '\n'.join(lines)
+
+
+class Sucker(object):
+    def __init__(self, host: str, device_owner: str, ip_address: str):
+        self.host = host
+        self.device_owner = device_owner
+        self.ip_address = ip_address
+        self.tag = None
+
+    def subnet_tag(self, subnet_id: str):
+        return f'{self.host}-subnet-{subnet_id}'
+
+    def __str__(self):
+        return (f"ip: {self.ip_address} \t"
+                f"binding_host: {self.host} \t"
+                f"device_owner: {self.device_owner}")
 
 
 class DictModel(dict):
@@ -149,6 +196,10 @@ class DhcpBase(object):
         self.process_monitor = process_monitor
         self.device_manager = DeviceManager(self.conf, plugin)
         self.version = version
+        self.octopus = Octopus()
+        self._init_octopus()
+        self.compute_to_network = dict()
+        self._init_compute_to_network()
 
     @abc.abstractmethod
     def enable(self):
@@ -192,6 +243,31 @@ class DhcpBase(object):
     def should_enable_metadata(cls, conf, network):
         """True if the metadata-proxy should be enabled for the network."""
         raise NotImplementedError()
+
+    def _init_compute_to_network(self):
+        for network_node in self.conf.network_nodes:
+            self.conf.register_opts(NETWORK_HOST_OPTS, group=network_node)
+            network_group = self.conf.get(network_node, None)
+            if network_group:
+                compute_nodes = network_group.get('compute_nodes', [])
+                for compute_node in compute_nodes:
+                    self.compute_to_network[compute_node] = network_node
+
+    def _init_octopus(self):
+        for subnet in self.network.subnets:
+            self.octopus.tentacles[subnet.id] = Tentacle(subnet.gateway_ip)
+
+        for port in self.network.ports:
+            for ip in port.fixed_ips:
+                host = port.get('binding:host_id')
+                device_owner = port.get('device_owner')
+                ip_address = ip.get('ip_address')
+                tentacle = self.octopus.tentacles[ip.subnet_id]
+                sucker = Sucker(host, device_owner, ip_address)
+                tentacle.suckers[port.id] = sucker
+                if (device_owner in (constants.DEVICE_OWNER_HA_REPLICATED_INT,
+                                     constants.DEVICE_OWNER_ROUTER_INTF)):
+                    tentacle.gateway_ports[host] = sucker
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -841,8 +917,18 @@ class Dnsmasq(DhcpLocalProcess):
                               (port.mac_address, tag, name, ip_address,
                                'set:', self._PORT_TAG_PREFIX % port.id))
             else:
-                buf.write('%s,%s%s,%s\n' %
-                          (port.mac_address, tag, name, ip_address))
+                subnet_tag = f'subnet-{alloc.subnet_id}'
+                if self.conf.enable_set_route_for_single_port:
+                    tentacle = self.octopus.tentacles[alloc.subnet_id]
+                    sucker = tentacle.suckers[port.id]
+                    tentacle.tags.append(subnet_tag)
+                    if sucker.device_owner.startswith(
+                            constants.DEVICE_OWNER_COMPUTE_PREFIX):
+                        subnet_tag = sucker.subnet_tag(alloc.subnet_id)
+                        sucker.tag = subnet_tag
+
+                buf.write(f'{port.mac_address},{tag}{name},{ip_address},'
+                          f'set:{subnet_tag}\n')
 
         file_utils.replace_file(filename, buf.getvalue())
         LOG.debug('Done building host file %s', filename)
@@ -1059,7 +1145,8 @@ class Dnsmasq(DhcpLocalProcess):
         """Write a dnsmasq compatible options file."""
         options, subnet_index_map = self._generate_opts_per_subnet()
         options += self._generate_opts_per_port(subnet_index_map)
-
+        if self.conf.enable_set_route_for_single_port:
+            options += self._generate_opts_for_compute_port(options)
         name = self.get_conf_file_name('opts')
         file_utils.replace_file(name, '\n'.join(options))
         return name
@@ -1219,6 +1306,50 @@ class Dnsmasq(DhcpLocalProcess):
                                 Dnsmasq._convert_to_literal_addrs(ip_version,
                                                                   vx_ips))))
         return options
+
+    def _generate_opts_for_compute_port(self, options: List[str]) -> List[str]:
+        new_options = []
+        LOG.debug(self.octopus)
+        if not self.compute_to_network:
+            LOG.warning('CONF.enable_set_route_for_single_port is True, '
+                        'but not configured.')
+            return new_options
+        for subnet_id, tentacle in self.octopus.tentacles.items():
+            if len(tentacle.tags) == 0:
+                continue
+            if len(tentacle.gateway_ports) <= 1:
+                LOG.info(f'Subnet {subnet_id} is not bound '
+                         f'to different routers, '
+                         f'so skip generate options for compute ports.')
+                continue
+            for port_id, sucker in tentacle.suckers.items():
+                if not sucker.tag:
+                    continue
+                if not sucker.device_owner.startswith(
+                        constants.DEVICE_OWNER_COMPUTE_PREFIX):
+                    continue
+                network_node = self.compute_to_network.get(sucker.host, None)
+                if not network_node:
+                    LOG.warning(f'Compute host {sucker.host} not configured.')
+                    continue
+                port = tentacle.gateway_ports.get(network_node, None)
+                if not port:
+                    LOG.warning(f'Subnet {subnet_id} does not have gateway '
+                                f'port on network host {network_node}.')
+                    continue
+                if tentacle.gateway_ip == port.ip_address:
+                    continue
+                for option in options.copy():
+                    if subnet_id in option:
+                        option = option.replace(f'subnet-{subnet_id}',
+                                                sucker.tag)
+                        if ('option:classless-static-route' in option or
+                                ',249,' in option or 'option:router' in option):
+                            gateway_ip = option.split(',')[-1]
+                            option = option.replace(gateway_ip,
+                                                    port.ip_address)
+                        new_options.append(option)
+        return new_options
 
     def _make_subnet_interface_ip_map(self):
         subnet_lookup = dict(

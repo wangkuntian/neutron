@@ -47,9 +47,12 @@ class KeepalivedUnixDomainConnection(agent_utils.UnixDomainHTTPConnection):
 
 
 class MonitorDaemon(daemon.Daemon):
-    def __init__(self, pidfile, router_id, user, group, namespace, conf_dir,
-                 interface, cidr):
+    def __init__(self, pidfile, host, router_id, master, slaves, user, group,
+                 namespace, conf_dir, interface, cidr):
+        self.host = host
         self.router_id = router_id
+        self.master = master
+        self.slaves = slaves
         self.namespace = namespace
         self.conf_dir = conf_dir
         self.interface = interface
@@ -62,6 +65,8 @@ class MonitorDaemon(daemon.Daemon):
                                             user=user, group=group)
 
     def run(self):
+        LOG.debug(f'Router: {self.router_id} master is {self.master}, '
+                  f'salves are {self.slaves}.')
         self._thread_ip_monitor = threading.Thread(
             target=ip_lib.ip_monitor,
             args=(self.namespace, self.queue, self.event_stop,
@@ -169,7 +174,10 @@ def main():
     keepalived.register_l3_agent_keepalived_opts()
     configure(cfg.CONF)
     MonitorDaemon(cfg.CONF.pid_file,
+                  cfg.CONF.host,
                   cfg.CONF.router_id,
+                  cfg.CONF.master_agent,
+                  cfg.CONF.slave_agents,
                   cfg.CONF.user,
                   cfg.CONF.group,
                   cfg.CONF.namespace,
