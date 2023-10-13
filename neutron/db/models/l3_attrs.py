@@ -41,6 +41,8 @@ class RouterExtraAttributes(model_base.BASEV2):
     # Availability Zone support
     availability_zone_hints = sa.Column(sa.String(255))
 
+    configurations = sa.Column(sa.String(4095))
+
     router = orm.relationship(
         'Router', load_on_pending=True,
         backref=orm.backref("extra_attributes", lazy='joined',

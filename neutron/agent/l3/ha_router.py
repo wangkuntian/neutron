@@ -17,6 +17,7 @@ import shutil
 import signal
 
 import netaddr
+from typing import Optional, List
 from neutron_lib.api.definitions import portbindings
 from neutron_lib import constants as n_consts
 from neutron_lib.utils import runtime
@@ -137,6 +138,22 @@ class HaRouter(router.RouterInfo):
         else:
             return False
 
+    @property
+    def configurations(self) -> Optional[dict]:
+        return self.router.get('configurations', {})
+
+    @property
+    def master(self) -> Optional[str]:
+        if self.configurations:
+            return self.configurations.get('master_agent', None)
+        return None
+
+    @property
+    def slaves(self) -> Optional[List[str]]:
+        if self.configurations:
+            return self.configurations.get('slave_agents', [])
+        return []
+
     def initialize(self, process_monitor):
         ha_port = self.router.get(n_consts.HA_INTERFACE_KEY)
         if not ha_port:
@@ -162,19 +179,32 @@ class HaRouter(router.RouterInfo):
             throttle_restart_value=(
                 self.agent_conf.ha_vrrp_advert_int * THROTTLER_MULTIPLIER))
 
+        # The following call is required to ensure that if the state path does
+        # not exist it gets created.
+        self.keepalived_manager.get_full_config_file_path('test')
+
         config = self.keepalived_manager.config
 
         interface_name = self.get_ha_device_name()
         subnets = self.ha_port.get('subnets', [])
         ha_port_cidrs = [subnet['cidr'] for subnet in subnets]
+        nopreempt = True
+        state = 'BACKUP'
+        priority = self.ha_priority
+        if self.slaves and self.master:
+            nopreempt = False
+            if self.master == self.agent_conf.host:
+                state = 'MASTER'
+                priority = keepalived.HA_DEFAULT_MASTER_PRIORITY
+
         instance = keepalived.KeepalivedInstance(
-            'BACKUP',
+            state,
             interface_name,
             self.ha_vr_id,
             ha_port_cidrs,
-            nopreempt=True,
+            nopreempt=nopreempt,
             advert_int=self.agent_conf.ha_vrrp_advert_int,
-            priority=self.ha_priority,
+            priority=priority,
             vrrp_health_check_interval=(
                 self.agent_conf.ha_vrrp_health_check_interval),
             ha_conf_dir=self.keepalived_manager.get_conf_dir())
@@ -396,13 +426,16 @@ class HaRouter(router.RouterInfo):
         ha_device = self.get_ha_device_name()
         ha_cidr = self._get_primary_vip()
         config_dir = self.keepalived_manager.get_conf_dir()
-        state_change_log = (
-            "%s/neutron-keepalived-state-change.log") % config_dir
+        state_change_log = f"{config_dir}/neutron-keepalived-state-change.log"
 
         def callback(pid_file):
+            LOG.info(f'Router: {self.router_id} master is {self.master}, '
+                     f'salves are {self.slaves}.')
             cmd = [
                 STATE_CHANGE_PROC_NAME,
                 '--router_id=%s' % self.router_id,
+                '--master_agent=%s' % self.master,
+                '--slave_agents=%s' % ','.join(self.slaves),
                 '--namespace=%s' % self.ha_namespace,
                 '--conf_dir=%s' % config_dir,
                 '--log-file=%s' % state_change_log,
@@ -453,9 +486,7 @@ class HaRouter(router.RouterInfo):
         return port1_filtered == port2_filtered
 
     def external_gateway_added(self, ex_gw_port, interface_name):
-        link_up = self.external_gateway_link_up()
-        self._plug_external_gateway(ex_gw_port, interface_name,
-                                    self.ns_name, link_up=link_up)
+        self._plug_external_gateway(ex_gw_port, interface_name, self.ns_name)
         self._add_gateway_vip(ex_gw_port, interface_name)
         self._disable_ipv6_addressing_on_interface(interface_name)
 
@@ -519,30 +550,3 @@ class HaRouter(router.RouterInfo):
         if (self.keepalived_manager.get_process().active and
                 self.ha_state == 'master'):
             super(HaRouter, self).enable_radvd(internal_ports)
-
-    def external_gateway_link_up(self):
-        # Check HA router ha_state for its gateway port link state.
-        # 'backup' instance will not link up the gateway port.
-        return self.ha_state == 'master'
-
-    def set_external_gw_port_link_status(self, link_up, set_gw=False):
-        link_state = "up" if link_up else "down"
-        LOG.info('Set router %s gateway device link state to %s.',
-                 self.router_id, link_state)
-
-        ex_gw_port = self.get_ex_gw_port()
-        ex_gw_port_id = (ex_gw_port and ex_gw_port['id'] or
-                         self.ex_gw_port and self.ex_gw_port['id'])
-        if ex_gw_port_id:
-            interface_name = self.get_external_device_name(ex_gw_port_id)
-            ns_name = self.get_gw_ns_name()
-            if (not self.driver.set_link_status(
-                    interface_name, namespace=ns_name, link_up=link_up) and
-                    link_up):
-                LOG.error('Gateway interface for router %s was not set up; '
-                          'router will not work properly', self.router_id)
-            if link_up and set_gw:
-                preserve_ips = self.get_router_preserve_ips()
-                self._external_gateway_settings(ex_gw_port, interface_name,
-                                                ns_name, preserve_ips)
-                self.routes_updated([], self.routes)

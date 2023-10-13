@@ -47,6 +47,7 @@ from neutron.common import ipv6_utils
 from neutron.common import utils
 from neutron.db import _utils as db_utils
 from neutron.db.models import l3 as l3_models
+from neutron.plugins.ml2 import models as ml2_models
 from neutron.db import models_v2
 from neutron.db import standardattrdescription_db as st_attr
 from neutron.extensions import l3
@@ -1086,21 +1087,37 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
         # with subnet's gateway-ip, return that router.
         # Otherwise return the first router.
         RouterPort = l3_models.RouterPort
+        RouterPortBinding = orm.aliased(ml2_models.PortBinding,
+                                        name="router_port_binding")
+        ComputePortBinding = orm.aliased(ml2_models.PortBinding,
+                                         name="compute_port_binding")
         gw_port = orm.aliased(models_v2.Port, name="gw_port")
         # TODO(lujinluo): Need IPAllocation and Port object
         routerport_qry = context.session.query(
-            RouterPort.router_id, models_v2.IPAllocation.ip_address).join(
-            RouterPort.port, models_v2.Port.fixed_ips).filter(
+            RouterPort.router_id, models_v2.IPAllocation.ip_address,
+            RouterPortBinding.host, ComputePortBinding.host,
+        ).join(
+            RouterPort.port, models_v2.Port.fixed_ips
+        ).filter(
             models_v2.Port.network_id == internal_port['network_id'],
             RouterPort.port_type.in_(constants.ROUTER_INTERFACE_OWNERS),
-            models_v2.IPAllocation.subnet_id == internal_subnet['id']
-        ).join(gw_port, gw_port.device_id == RouterPort.router_id).filter(
+            models_v2.IPAllocation.subnet_id == internal_subnet['id'],
+            ComputePortBinding.port_id == internal_port['id'],
+        ).join(
+            gw_port, gw_port.device_id == RouterPort.router_id
+        ).filter(
             gw_port.network_id == external_network_id,
             gw_port.device_owner == DEVICE_OWNER_ROUTER_GW
+        ).join(
+            RouterPortBinding, RouterPortBinding.port_id == models_v2.Port.id
         ).distinct()
 
         first_router_id = None
-        for router_id, interface_ip in routerport_qry:
+        for (router_id, interface_ip,
+             network_host, compute_host) in routerport_qry:
+            network_node = self.compute_to_network.get(compute_host, None)
+            if network_node and network_node == network_host:
+                return router_id
             if interface_ip == internal_subnet['gateway_ip']:
                 return router_id
             if not first_router_id:

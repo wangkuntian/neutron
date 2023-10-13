@@ -259,17 +259,16 @@ class LinuxInterfaceDriver(object):
 
     @abc.abstractmethod
     def plug_new(self, network_id, port_id, device_name, mac_address,
-                 bridge=None, namespace=None, prefix=None, mtu=None,
-                 link_up=True):
+                 bridge=None, namespace=None, prefix=None, mtu=None):
         """Plug in the interface only for new devices that don't exist yet."""
 
     def plug(self, network_id, port_id, device_name, mac_address,
-             bridge=None, namespace=None, prefix=None, mtu=None, link_up=True):
+             bridge=None, namespace=None, prefix=None, mtu=None):
         if not ip_lib.device_exists(device_name,
                                     namespace=namespace):
             self._safe_plug_new(
                 network_id, port_id, device_name, mac_address, bridge,
-                namespace, prefix, mtu, link_up)
+                namespace, prefix, mtu)
         else:
             LOG.info("Device %s already exists", device_name)
             if mtu:
@@ -279,11 +278,11 @@ class LinuxInterfaceDriver(object):
                 LOG.warning("No MTU configured for port %s", port_id)
 
     def _safe_plug_new(self, network_id, port_id, device_name, mac_address,
-            bridge=None, namespace=None, prefix=None, mtu=None, link_up=True):
+            bridge=None, namespace=None, prefix=None, mtu=None):
         try:
             self.plug_new(
                 network_id, port_id, device_name, mac_address, bridge,
-                namespace, prefix, mtu, link_up)
+                namespace, prefix, mtu)
         except TypeError:
             LOG.warning("Interface driver's plug_new() method should now "
                         "accept additional optional parameter 'link_up'. "
@@ -321,27 +320,10 @@ class LinuxInterfaceDriver(object):
             LOG.warning("Interface driver cannot update MTU for ports")
             self._mtu_update_warn_logged = True
 
-    def set_link_status(self, device_name, namespace=None, link_up=True):
-        ns_dev = ip_lib.IPWrapper(namespace=namespace).device(device_name)
-        try:
-            utils.wait_until_true(ns_dev.exists, timeout=3)
-        except utils.WaitTimeout:
-            LOG.debug('Device %s may have been deleted concurrently',
-                      device_name)
-            return False
-
-        if link_up:
-            ns_dev.link.set_up()
-        else:
-            ns_dev.link.set_down()
-
-        return True
-
 
 class NullDriver(LinuxInterfaceDriver):
     def plug_new(self, network_id, port_id, device_name, mac_address,
-                 bridge=None, namespace=None, prefix=None, mtu=None,
-                 link_up=True):
+                 bridge=None, namespace=None, prefix=None, mtu=None):
         pass
 
     def unplug(self, device_name, bridge=None, namespace=None, prefix=None):
@@ -377,8 +359,7 @@ class OVSInterfaceDriver(LinuxInterfaceDriver):
         ovs.replace_port(device_name, *attrs)
 
     def plug_new(self, network_id, port_id, device_name, mac_address,
-                 bridge=None, namespace=None, prefix=None, mtu=None,
-                 link_up=True):
+                 bridge=None, namespace=None, prefix=None, mtu=None):
         """Plug in the interface."""
         if not bridge:
             bridge = self.conf.ovs_integration_bridge
@@ -442,8 +423,8 @@ class OVSInterfaceDriver(LinuxInterfaceDriver):
         else:
             LOG.warning("No MTU configured for port %s", port_id)
 
-        if link_up:
-            ns_dev.link.set_up()
+        ns_dev.link.set_up()
+
         if self.conf.ovs_use_veth:
             # ovs-dpdk does not do checksum calculations for veth interface
             # (bug 1832021)
@@ -488,8 +469,7 @@ class BridgeInterfaceDriver(LinuxInterfaceDriver):
     DEV_NAME_PREFIX = 'ns-'
 
     def plug_new(self, network_id, port_id, device_name, mac_address,
-                 bridge=None, namespace=None, prefix=None, mtu=None,
-                 link_up=True):
+                 bridge=None, namespace=None, prefix=None, mtu=None):
         """Plugin the interface."""
         ip = ip_lib.IPWrapper()
 
@@ -508,8 +488,7 @@ class BridgeInterfaceDriver(LinuxInterfaceDriver):
             LOG.warning("No MTU configured for port %s", port_id)
 
         root_veth.link.set_up()
-        if link_up:
-            ns_veth.link.set_up()
+        ns_veth.link.set_up()
 
     def unplug(self, device_name, bridge=None, namespace=None, prefix=None):
         """Unplug the interface."""

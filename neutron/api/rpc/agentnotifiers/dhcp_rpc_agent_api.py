@@ -312,6 +312,15 @@ class DhcpAgentNotifyAPI(object):
             return False
         if set(orig.keys()) != set(new.keys()):
             return False
+
+        if cfg.CONF.enable_set_route_for_single_port:
+            device_owner = new.get('device_owner', None)
+            orig_device_owner = orig.get('device_owner', None)
+            if (not orig_device_owner and device_owner and
+                    device_owner.startswith(
+                        constants.DEVICE_OWNER_COMPUTE_PREFIX)):
+                return True
+
         for k in orig.keys():
             if k in ('status', 'updated_at', 'revision_number'):
                 continue

@@ -19,6 +19,7 @@ from oslo_config import cfg
 
 from neutron._i18n import _
 from neutron.db.models import l3_attrs
+from neutron.objects.base import NeutronDbObject
 
 
 def get_attr_info():
@@ -29,7 +30,11 @@ def get_attr_info():
             'availability_zone_hints': {
                 'default': '[]',
                 'transform_to_db': az_validator.convert_az_list_to_string,
-                'transform_from_db': az_validator.convert_az_string_to_list}
+                'transform_from_db': az_validator.convert_az_string_to_list},
+            'configurations': {
+                'default': '{}',
+                'transform_to_db': NeutronDbObject.filter_to_json_str,
+                'transform_from_db': NeutronDbObject.load_json_from_str}
             }
 
 

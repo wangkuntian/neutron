@@ -20,6 +20,8 @@ from neutron._i18n import _
 
 CLI_OPTS = [
     cfg.StrOpt('router_id', help=_('ID of the router')),
+    cfg.StrOpt('master_agent', help=_('The master agent of router')),
+    cfg.ListOpt('slave_agents', help=_('The slave agents of router')),
     cfg.StrOpt('namespace', help=_('Namespace of the router')),
     cfg.StrOpt('conf_dir', help=_('Path to the router directory')),
     cfg.StrOpt('monitor_interface', help=_('Interface to monitor')),

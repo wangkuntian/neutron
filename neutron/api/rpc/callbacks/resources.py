@@ -15,6 +15,7 @@ from neutron.objects import conntrack_helper
 from neutron.objects.logapi import logging_resource as log_object
 from neutron.objects import network
 from neutron.objects import port_forwarding
+from neutron.objects import rg_port_forwarding
 from neutron.objects import ports
 from neutron.objects.qos import policy
 from neutron.objects import securitygroup
@@ -33,6 +34,7 @@ SUBNET = subnet.Subnet.obj_name()
 SECURITYGROUP = securitygroup.SecurityGroup.obj_name()
 SECURITYGROUPRULE = securitygroup.SecurityGroupRule.obj_name()
 PORTFORWARDING = port_forwarding.PortForwarding.obj_name()
+RGPORTFORWARDING = rg_port_forwarding.RGPortForwarding.obj_name()
 CONNTRACKHELPER = conntrack_helper.ConntrackHelper.obj_name()
 
 
@@ -47,6 +49,7 @@ _VALID_CLS = (
     securitygroup.SecurityGroupRule,
     log_object.Log,
     port_forwarding.PortForwarding,
+    rg_port_forwarding.RGPortForwarding,
     conntrack_helper.ConntrackHelper,
 )
 
