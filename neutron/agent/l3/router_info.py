@@ -697,16 +697,14 @@ class RouterInfo(BaseRouterInfo):
         return [common_utils.ip_to_cidr(ip['floating_ip_address'])
                 for ip in floating_ips]
 
-    def _plug_external_gateway(self, ex_gw_port, interface_name, ns_name,
-                               link_up=True):
+    def _plug_external_gateway(self, ex_gw_port, interface_name, ns_name):
         self.driver.plug(ex_gw_port['network_id'],
                          ex_gw_port['id'],
                          interface_name,
                          ex_gw_port['mac_address'],
                          namespace=ns_name,
                          prefix=EXTERNAL_DEV_PREFIX,
-                         mtu=ex_gw_port.get('mtu'),
-                         link_up=link_up)
+                         mtu=ex_gw_port.get('mtu'))
 
     def _get_external_gw_ips(self, ex_gw_port):
         gateway_ips = []
