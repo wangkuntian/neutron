@@ -23,6 +23,7 @@ from neutron_lib.callbacks import events
 from neutron_lib.callbacks import exceptions
 from neutron_lib.callbacks import registry
 from neutron_lib.callbacks import resources
+from neutron_lib.callbacks import priority_group
 from neutron_lib import constants
 from neutron_lib import context as n_ctx
 from neutron_lib.db import api as db_api
@@ -2077,3 +2078,32 @@ class L3_NAT_db_mixin(L3_NAT_dbonly_mixin, L3RpcNotifierMixin):
             if rp.port_type == old_owner:
                 rp.port_type = new_owner
                 rp.port.device_owner = new_owner
+
+    @registry.receives(resources.ROUTER, [events.AFTER_UPDATE],
+                       priority_group.PRIORITY_ROUTER_EXTENDED_ATTRIBUTE)
+    def _reconfigure_router(self, resource, event, trigger, context,
+                                  router_id, old_router, router, router_db,
+                                  **kwargs):
+        """Event handler to react to changes after
+        admin_state_up flag has been updated.
+        """
+
+        if old_router['ha'] or router['ha']:
+            return
+
+        configurations = router['configurations']
+        preferred_agent = configurations.get('preferred_agent', None)
+
+        agent_changed = preferred_agent is not None
+
+        router_state_changed = (old_router['admin_state_up'] !=
+                                router['admin_state_up'])
+
+        if not old_router['admin_state_up'] and router_state_changed:
+            if agent_changed:
+                for agent in self.get_l3_agents_hosting_routers(context,
+                                                                [router_id]):
+                    self.remove_router_from_l3_agent(context, agent['id'],
+                                                     router_id)
+                self.schedule_router(context, router_id)
+                self._notify_router_updated(context, router_db.id)

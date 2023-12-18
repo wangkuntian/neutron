@@ -546,6 +546,9 @@ class L3_HA_NAT_db_mixin(l3_dvr_db.L3_NAT_with_dvr_db_mixin,
         old_configurations = payload.states[0].get('configurations', {})
         configurations = payload.request_body.get('configurations', {})
 
+        if not old_configurations:
+            old_configurations = dict()
+
         if not configurations:
             return
 
